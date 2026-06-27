@@ -51,7 +51,7 @@ pip install -r requirements.txt
 
 ```bash
 conda activate piwifi
-cd F:\Person-in-WiFi-3D
+cd /d F:\Person-in-WiFi-3D   # Anaconda Prompt(cmd)需 /d 才會切換磁碟機
 
 # 1) 驗證資料格式(換資料必跑:印 CSI/keypoint shape、座標單位、人數分布)
 python src/inspect_data.py --root data/wifipose_dataset
