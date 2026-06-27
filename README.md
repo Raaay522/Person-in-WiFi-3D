@@ -20,16 +20,31 @@ Person-in-WiFi-3D/
 │  ├─ model.py          CNN [9,30,20] → 14×3
 │  ├─ train.py          建快取 → 訓練 + MPJPE + 平均姿態基線 + 逐關節
 │  └─ plot_results.py   成果圖
-├─ data/
+├─ data/                          (不入庫)
 │  ├─ wifipose_dataset/
 │  │  ├─ train_data/{csi/*.mat, keypoint/*.npy, train_data_list.txt}   (89946)
 │  │  └─ test_data /{csi/*.mat, keypoint/*.npy, test_data_list.txt}    (7824)
-│  └─ _piw3d_cache_s{2,5}.npz   訓練快取(秒級重訓)
+│  └─ _piw3d_cache_s{2,5}.npz     訓練快取
 ├─ runs/
-│  ├─ last.pt                   訓練權重
-│  └─ piw3d_results.png         成果圖
-├─ repo/                        官方 OPERA repo(參考用)
+│  ├─ last.pt                     訓練權重(不入庫)
+│  └─ piw3d_results.png           成果圖
+├─ repo/                          官方 OPERA repo(參考用,不入庫)
+├─ requirements.txt
+├─ .gitignore
 └─ README.md
+```
+
+## 安裝指令
+
+```bash
+conda create -n piwifi python=3.10 -y
+conda activate piwifi
+
+# PyTorch(CUDA 12.1;CPU 版把 --index-url 整段拿掉)
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+# 其餘依賴
+pip install -r requirements.txt
 ```
 
 ## 執行指令
