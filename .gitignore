@@ -1,0 +1,17 @@
+# 資料集與大型產物(不上傳)
+data/
+runs/*.pt
+runs/*.npz
+
+# 第三方:官方 OPERA repo(僅本地參考)
+repo/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# 其他
+*.zip
+.ipynb_checkpoints/
