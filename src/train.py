@@ -1,7 +1,8 @@
 """PiW-3D 單人 3D 姿態訓練(path-b)。先建快取再訓練;誠實評估 MPJPE + 平均姿態基線 + 逐關節。
+訓練時記錄 metrics.csv(loss/MPJPE/PCK),結束畫曲線圖到 runs/(見 plot_metrics.py)。
 
 用法(piwifi):
-  python src/train.py --root F:/Person-in-WiFi-3D/data/wifipose --stride 3 --epochs 60
+  python src/train.py --root F:/Person-in-WiFi-3D/data/wifipose_dataset --stride 2 --epochs 60
   # --unit_scale 1000:GT 公尺→輸出 mm(已由 inspect 確認是公尺)
   # 首次會建快取 _piw3d_cache_s{stride}.npz(較久);之後秒載
 """
@@ -20,27 +21,30 @@ from model import WifiPose3DNet             # noqa: E402
 
 
 @torch.no_grad()
-def evaluate(model, X, Y, dev, scale):
+def evaluate(model, X, Y, dev, scale, pck_thr=150.0):
     model.eval()
     P = []
     for i in range(0, len(X), 512):
         P.append(model(X[i:i + 512].to(dev)).cpu())
     P = torch.cat(P).reshape(-1, N_JOINT, 3)
     G = Y.reshape(-1, N_JOINT, 3)
-    mp = (P - G).norm(dim=2)                          # [N,14]
-    bp = (G - G.mean(0, keepdim=True)).norm(dim=2)    # 平均姿態基線
-    return mp.mean().item() * scale, bp.mean().item() * scale, mp.mean(0) * scale, bp.mean(0) * scale
+    err = (P - G).norm(dim=2) * scale                          # [N,14] mm
+    base_err = (G - G.mean(0, keepdim=True)).norm(dim=2) * scale
+    pck = (err < pck_thr).float().mean().item()                # 命中率 @ 門檻
+    return (err.mean().item(), base_err.mean().item(),
+            err.mean(0), base_err.mean(0), pck, P, G)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", default="F:/Person-in-WiFi-3D/data/wifipose")
-    ap.add_argument("--stride", type=int, default=3, help="抽樣(連續幀相似,降量省記憶體)")
+    ap.add_argument("--root", default="F:/Person-in-WiFi-3D/data/wifipose_dataset")
+    ap.add_argument("--stride", type=int, default=2)
     ap.add_argument("--epochs", type=int, default=60)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--root_joint", type=int, default=0)
     ap.add_argument("--unit_scale", type=float, default=1000.0)
+    ap.add_argument("--pck_thr", type=float, default=150.0, help="PCK 門檻(mm)")
     ap.add_argument("--out", default="F:/Person-in-WiFi-3D/runs")
     args = ap.parse_args()
 
@@ -58,40 +62,57 @@ def main():
     print(f"train {Xtr.shape}  test {Xva.shape}", flush=True)
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    mu, sd = Xtr.mean((0, 2, 3), keepdims=True), Xtr.std((0, 2, 3), keepdims=True) + 1e-6  # 逐通道
-    Xtr -= mu; Xtr /= sd; Xva -= mu; Xva /= sd        # 原地(省記憶體)
+    mu, sd = Xtr.mean((0, 2, 3), keepdims=True), Xtr.std((0, 2, 3), keepdims=True) + 1e-6
+    Xtr -= mu; Xtr /= sd; Xva -= mu; Xva /= sd
     dl = DataLoader(TensorDataset(torch.from_numpy(Xtr), torch.from_numpy(Ytr)),
                     batch_size=args.batch, shuffle=True, drop_last=True)
     Xva_t = torch.from_numpy(Xva)
     Yva_t = torch.from_numpy(Yva)
 
-    base = (Yva_t.reshape(-1, N_JOINT, 3) - Yva_t.reshape(-1, N_JOINT, 3).mean(0, keepdim=True)
-            ).norm(dim=2).mean().item() * args.unit_scale
-    print(f"平均姿態基線 MPJPE = {base:.1f}mm  (模型要顯著低於才算學到)", flush=True)
-
     model = WifiPose3DNet(in_ch=9, n_joint=N_JOINT).to(dev)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
     lossf = nn.MSELoss()
     os.makedirs(args.out, exist_ok=True)
+    csv_path = os.path.join(args.out, "metrics.csv")
+    with open(csv_path, "w", encoding="utf-8") as f:
+        f.write("epoch,train_loss,mpjpe,baseline,pck\n")
+
     best = 1e9
     for ep in range(args.epochs):
         model.train()
+        tot, n = 0.0, 0
         for xb, yb in dl:
             xb, yb = xb.to(dev), yb.to(dev)
             opt.zero_grad()
-            lossf(model(xb), yb).backward()
+            loss = lossf(model(xb), yb)
+            loss.backward()
             opt.step()
-        m, b, mj, bj = evaluate(model, Xva_t, Yva_t, dev, args.unit_scale)
+            tot += loss.item() * len(xb); n += len(xb)
+        train_loss = tot / n
+        m, b, mj, bj, pck, P, G = evaluate(model, Xva_t, Yva_t, dev, args.unit_scale, args.pck_thr)
         best = min(best, m)
+        with open(csv_path, "a", encoding="utf-8") as f:
+            f.write(f"{ep},{train_loss:.6f},{m:.2f},{b:.2f},{pck:.4f}\n")
         flag = "OK 贏基線" if m < b else "✗ 未贏"
-        msg = f"ep{ep} MPJPE={m:.1f}mm 基線={b:.1f} [{flag}]"
-        if ep % 5 == 0:
-            msg += f" | 逐關節贏 {int((mj < bj).sum())}/{N_JOINT}"
-        print(msg, flush=True)
+        print(f"ep{ep} loss={train_loss:.4f} MPJPE={m:.1f}mm 基線={b:.1f} "
+              f"PCK@{args.pck_thr:.0f}={pck:.3f} [{flag}]", flush=True)
         torch.save({"model": model.state_dict(), "epoch": ep}, os.path.join(args.out, "last.pt"))
-    print(f"\n最佳 MPJPE={best:.1f}mm vs 基線 {base:.1f}mm → "
-          f"{'有信號(贏 %.0f%%)' % (100*(base-best)/base) if best < base*0.97 else '無顯著信號'}",
-          flush=True)
+
+    # 存最終評估資料(逐關節 + 幾筆 val 樣本)供畫圖
+    K = min(8, len(P))
+    idx = np.linspace(0, len(P) - 1, K).astype(int)
+    np.savez(os.path.join(args.out, "_eval.npz"),
+             per_joint_mp=mj.numpy(), per_joint_base=bj.numpy(),
+             pred=P[idx].numpy(), gt=G[idx].numpy())
+    print(f"\n最佳 MPJPE={best:.1f}mm vs 基線 {b:.1f}mm → "
+          f"{'有信號(贏 %.0f%%)' % (100*(b-best)/b) if best < b*0.97 else '無顯著信號'}", flush=True)
+
+    try:
+        import plot_metrics
+        plot_metrics.make_all(args.out)
+        print("已產生曲線圖 → runs/(loss/mpjpe/pck/per_joint/val_overlay)", flush=True)
+    except Exception as e:
+        print(f"畫圖略過({e})", flush=True)
 
 
 if __name__ == "__main__":
